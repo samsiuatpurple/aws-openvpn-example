@@ -1,0 +1,11 @@
+{
+  "Parameters": {
+    "ActivationKey": "",
+    "KeyName": "",
+    "VpcId": "",
+    "InstanceType": "t2.micro",
+    "InstanceName": "",
+    "AdminPassword": "",
+    "UserPassword": ""
+  }
+}

@@ -1,0 +1,324 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Access Server: Adds an EC2 instance and a security group. Installs
+  the latest version of Access Server and provides direct access to
+  Administration Portal **WARNING** This template creates an Amazon EC2
+  instance. You will be billed for the AWS resources used if you create a stack
+  from this template.'
+Parameters:
+  ActivationKey:
+    Description: Subcription key for the OpenVPN Access Server instance
+    Type: String
+    NoEcho: true
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    AllowedPattern: .+
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  VpcId:
+    Description: ID of your existing Virtual Private Cloud (VPC)
+    Type: String
+    AllowedPattern: .+
+    ConstraintDescription: must be an existing VPC
+  InstanceType:
+    Description: Access Server EC2 instance type
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t1.micro
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t2.large
+      - t3.nano
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - m1.small
+      - m1.medium
+      - m1.large
+      - m1.xlarge
+      - m2.xlarge
+      - m2.2xlarge
+      - m2.4xlarge
+      - m3.medium
+      - m3.large
+      - m3.xlarge
+      - m3.2xlarge
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+      - m4.4xlarge
+      - m4.10xlarge
+      - c1.medium
+      - c1.xlarge
+      - c3.large
+      - c3.xlarge
+      - c3.2xlarge
+      - c3.4xlarge
+      - c3.8xlarge
+      - c4.large
+      - c4.xlarge
+      - c4.2xlarge
+      - c4.4xlarge
+      - c4.8xlarge
+      - g2.2xlarge
+      - g2.8xlarge
+      - r3.large
+      - r3.xlarge
+      - r3.2xlarge
+      - r3.4xlarge
+      - r3.8xlarge
+      - i2.xlarge
+      - i2.2xlarge
+      - i2.4xlarge
+      - i2.8xlarge
+      - d2.xlarge
+      - d2.2xlarge
+      - d2.4xlarge
+      - d2.8xlarge
+      - hi1.4xlarge
+      - hs1.8xlarge
+      - cr1.8xlarge
+      - cc2.8xlarge
+      - cg1.4xlarge
+    ConstraintDescription: must be a valid EC2 instance type.
+  InstanceName:
+    Description: EC2 Instance Name
+    Type: String
+    Default: OpenVPNAccessServer
+  AdminPassword:
+    Description: Password of Admin
+    Type: String
+    NoEcho: true
+  UserPassword:
+    Description: Password of User
+    Type: String
+    NoEcho: true
+Resources:
+  OpenVPNVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/22
+      Tags:
+        - Key: Name
+          Value: !Ref VpcId
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OpenVPNVPC
+      CidrBlock: 10.0.0.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub ${VpcId}-PublicSubnet
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${VpcId}-InternetGateway
+  RouteTablePublic:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OpenVPNVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${VpcId}-RouteTablePublic
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref OpenVPNVPC
+      InternetGatewayId: !Ref InternetGateway
+  RouteDefaultPublic:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref RouteTablePublic
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTablePublic
+  OpenVPNEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  AssociateManagementAccessPort:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt OpenVPNEIP.AllocationId
+      NetworkInterfaceId: !Ref NetworkInterface
+  NetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      Description: Public Interface
+      GroupSet:
+        - !Ref AccessServerSecurityGroup
+      SourceDestCheck: false
+      Tags:
+        - Key: Name
+          Value: Public ENI
+  DescribeImagesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeImages
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action: ec2:DescribeImages
+                Effect: Allow
+                Resource: '*'
+  ASLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: optional
+  GetASProps:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.10
+      Handler: index.handler
+      Role: !Sub ${DescribeImagesRole.Arn}
+      Timeout: 60
+      Code:
+        ZipFile: |-
+          import random
+          import string
+          import boto3
+          import cfnresponse
+          import json
+          import traceback
+          def handler(event, context):
+            try:
+              response = boto3.client('ec2').describe_images(
+                  Owners=[event['ResourceProperties']['Owner']], Filters=[{'Name': 'name', 'Values': [event['ResourceProperties']['Name']]}, {'Name': 'architecture', 'Values': [event['ResourceProperties']['Architecture']]}, {'Name': 'root-device-type', 'Values': ['ebs']}])
+              amis = sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {'id': amis[0]['ImageId']})
+            except:
+              traceback.print_last()
+              cfnresponse.send(event, context, cfnresponse.FAIL, {})
+  ASProps:
+    Type: Custom::ASParams
+    Properties:
+      ServiceToken: !Sub ${GetASProps.Arn}
+      Owner: '444663524611'
+      Name: OpenVPN Access Server Community Image
+      Architecture: x86_64
+  AccessServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable needed access to AS
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '943'
+          ToPort: '943'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '945'
+          ToPort: '945'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: '1194'
+          ToPort: '1194'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref OpenVPNVPC
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !GetAtt ASLaunchTemplate.LaunchTemplateId
+        Version: !GetAtt ASLaunchTemplate.LatestVersionNumber
+      InstanceType: !Ref InstanceType
+      SourceDestCheck: 'false'
+      KeyName: !Ref KeyName
+      ImageId: !GetAtt ASProps.id
+      Tags:
+        - Key: Name
+          Value: !Ref InstanceName
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: 'true'
+          DeviceIndex: '0'
+          GroupSet:
+            - !Ref AccessServerSecurityGroup
+          SubnetId: !Ref PublicSubnet
+      UserData: 
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo su
+          cd /usr/local/openvpn_as/scripts/
+          ./sacli -v "${ActivationKey}" LoadSubscription
+          ./sacli --user openvpn --new_pass "${AdminPassword}" SetLocalPassword
+          ./sacli --user openvpnuser --new_pass "${UserPassword}" SetLocalPassword
+
+          echo 'push "redirect-gateway def1"' > server_directive.txt
+          ./sacli --key "vpn.server.config_text" --value_file=./server_directive.txt ConfigPut
+
+          echo 'redirect-gateway def1' > client_directive.txt
+          ./sacli --key "vpn.client.config_text" --value_file=./client_directive.txt ConfigPut
+
+          ./sacli --key "vpn.client.routing.reroute_gw" --value "true" ConfigPut 
+          ./sacli start
+Outputs:
+  AdminPortal:
+    Value: !Join
+      - ''
+      - - https://
+        - !GetAtt EC2Instance.PublicIp
+        - /admin/
+    Description: This is the admin UI URL for your OpenVPN Access Server. Since the
+      server is initialized with a self-signed certificate, you will receive a
+      SSL error when the site is initially brought up. You may replace the
+      certificate with a trusted certificate at a later time if you'd like. Note
+      that it generally takes a few minutes before this URL becomes accessible.
+      Once the server is up, please login with the username 'openvpn' and the
+      password listed here.
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Access Server Configuration
+        Parameters:
+          - ActivationKey
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VpcId
+      - Label:
+          default: EC2 Configuration
+        Parameters:
+          - InstanceName
+          - InstanceType
+          - KeyName
+    ParameterLabels:
+      ActivationKey:
+        default: Activation Key
+      VpcId:
+        default: Choose VPC ID (*)
+      InstanceName:
+        default: Instance Name
+      InstanceType:
+        default: Instance Type
+      KeyName:
+        default: Key Pair Name (*)
