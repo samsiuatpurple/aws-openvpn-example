@@ -7,23 +7,13 @@ AWS_PROFILE=$1
 SUFFIX=$2
 REGION=$3
 
-SSH_KEY_PAIR=KeyPair-OpenVPN-$2
 VPC_ID=OpenVPN-VPC-$2
 INSTANCE_NAME=OpenVPN-AS-$2
 STACK_NAME=openvpn-personal-$2
 
-jq --arg SSH_KEY_PAIR "$SSH_KEY_PAIR" \
-    --arg VPC_ID "$VPC_ID" \
+jq  --arg VPC_ID "$VPC_ID" \
     --arg INSTANCE_NAME "$INSTANCE_NAME" \
-    '.Parameters.KeyName=$SSH_KEY_PAIR | .Parameters.VpcId=$VPC_ID | .Parameters.InstanceName=$INSTANCE_NAME' parameters.json >tmp.json && mv tmp.json parameters.json
-
-aws ec2 create-key-pair \
-    --key-name $SSH_KEY_PAIR \
-    --output text \
-    --profile $AWS_PROFILE \
-    --region $REGION \
-    --query 'KeyMaterial' >$SSH_KEY_PAIR.pem
-chmod 400 $SSH_KEY_PAIR.pem
+    '.Parameters.VpcId=$VPC_ID | .Parameters.InstanceName=$INSTANCE_NAME' parameters.json >tmp.json && mv tmp.json parameters.json
 
 EXIT_STATUS=$?
 if [ $EXIT_STATUS -ne 0 ]; then
@@ -41,8 +31,6 @@ aws cloudformation deploy \
 
 EXIT_STATUS=$?
 if [ $EXIT_STATUS -ne 0 ]; then
-    aws ec2 delete-key-pair --key-name $SSH_KEY_PAIR --region $REGION --profile $AWS_PROFILE
-    rm -f $SSH_KEY_PAIR.pem
     echo "Command failed with exit status $EXIT_STATUS."
     exit $EXIT_STATUS
 fi
@@ -50,5 +38,6 @@ fi
 echo "Admin portal url"
 aws cloudformation describe-stacks \
     --stack-name $STACK_NAME \
+    --profile $AWS_PROFILE \
     --region $REGION \
     | sed -n 's/.*"\(https:\/\/[^[:space:],]*\)".*/\1/p' 
